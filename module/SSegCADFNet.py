@@ -15,7 +15,6 @@ class XFormersAttention(nn.Module):
         self.conv = nn.Conv2d(channels, channels, 3, 1, padding="same", groups=channels)
         self.layernorm = Layernorm(channels, eps=1e-5)
         
-        # 线性投影层
         self.q_proj = nn.Linear(channels, channels)
         self.k_proj = nn.Linear(channels, channels)
         self.v_proj = nn.Linear(channels, channels)
@@ -30,26 +29,24 @@ class XFormersAttention(nn.Module):
     def forward(self, x):
         B, C, H, W = x.shape
         
-        # 准备输入
         att_value = self.att_value(x)
         att_value = att_value.view(B, C, H * W).permute(0, 2, 1)  # [B, H*W, C]
         
-        # 生成QKV
         q = self.q_proj(att_value)
         k = self.k_proj(att_value)
         v = self.v_proj(att_value)
         
-        # 使用xFormers的内存高效注意力
+
         output = xops.memory_efficient_attention(
             q, k, v,
             attn_bias=None,
-            op=None  # 自动选择最佳实现
+            op=None  
         )
         
-        # 输出投影
+
         output = self.out_proj(output)
         
-        # 恢复形状
+
         output = output.permute(0, 2, 1).view(B, C, H, W)
         return output
 
@@ -219,34 +216,32 @@ class Dilate_fusion(nn.Module):
         return x_out
 
 class EAF(nn.Module):
-    """
-    高效特征融合模块，专门为多尺度特征设计
-    """
+
     def __init__(self, in_channels, reduction=4):
         super().__init__()
         
         self.compressed_channels = in_channels // reduction
-        # 通道压缩
+
         self.compression = nn.Sequential(
             nn.Conv2d(in_channels, self.compressed_channels, 1),
             nn.BatchNorm2d(self.compressed_channels),
             nn.ReLU(inplace=True)
         )
         
-        # 空间注意力
+
         self.spatial_attention = nn.Sequential(
             nn.Conv2d(2, 1, 7, padding=3),
             nn.Sigmoid()
         )
         
-        # 通道注意力
+
         self.channel_attention = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Conv2d(self.compressed_channels, self.compressed_channels, 1),
             nn.Sigmoid()
         )
         
-        # 扩展回原通道数
+
         self.expansion = nn.Sequential(
             nn.Conv2d(self.compressed_channels, in_channels, 1),
             nn.BatchNorm2d(in_channels),
@@ -254,25 +249,25 @@ class EAF(nn.Module):
         )
 
     def forward(self, x):
-        # 压缩通道
+
         compressed = self.compression(x)
         
-        # 空间注意力
+
         avg_out = torch.mean(compressed, dim=1, keepdim=True)
         max_out, _ = torch.max(compressed, dim=1, keepdim=True)
         spatial_att = torch.cat([avg_out, max_out], dim=1)
         spatial_att = self.spatial_attention(spatial_att)
         
-        # 通道注意力
+
         channel_att = self.channel_attention(compressed)
         
-        # 应用注意力
+
         attended = compressed * spatial_att * channel_att
         
-        # 扩展回原通道数
+
         expanded = self.expansion(attended)
         
-        return expanded + x  # 残差连接
+        return expanded + x  
 
 class CADF(nn.Module):
     """
@@ -373,138 +368,12 @@ class SSCADFNet(nn.Module):
         return x
 
 
-from thop import profile, clever_format
-
-def calculate_params_flops(model, input_shape=(1, 3, 224, 224), device='cuda'):
-    """
-    计算模型的参数量和FLOPs
-    
-    Args:
-        model: PyTorch模型
-        input_shape: 输入张量形状 (batch_size, channels, height, width)
-        device: 计算设备
-    """
-    # 创建随机输入
-    dummy_input = torch.randn(input_shape).to(device)
-    model = model.to(device)
-    model.eval()
-    
-    # 计算FLOPs和参数量
-    flops, params = profile(model, inputs=(dummy_input,), verbose=False)
-    
-    # 格式化输出
-    flops, params = clever_format([flops, params], "%.3f")
-    
-    print(f"Parameters: {params}")
-    print(f"FLOPs: {flops}")
-    
-    return flops, params
-
-import time
-def measure_inference_speed(model, input_shape=(1, 3, 512, 512), num_runs=10, warmup=3, device='cuda'):
-    """
-    基础推理速度测量
-    """
-    model = model.to(device)
-    model.eval()
-    
-    # 创建输入张量
-    dummy_input = torch.randn(input_shape).to(device)
-    
-    # Warm-up
-    print("Warming up...")
-    with torch.no_grad():
-        for _ in range(warmup):
-            _ = model(dummy_input)
-    
-    # 测量推理时间
-    print("Measuring inference speed...")
-    latencies = []
-    
-    with torch.no_grad():
-        for _ in range(num_runs):
-            start_time = time.time()
-            _ = model(dummy_input)
-            torch.cuda.synchronize()  # 等待CUDA操作完成
-            end_time = time.time()
-            
-            latencies.append((end_time - start_time) * 1000)  # 转换为毫秒
-    
-    # 计算统计信息
-    latencies = np.array(latencies)
-    mean_latency = np.mean(latencies)
-    std_latency = np.std(latencies)
-    min_latency = np.min(latencies)
-    max_latency = np.max(latencies)
-    
-    # 计算FPS
-    fps = 1000 / mean_latency
-    
-    print(f"\n=== 推理速度分析 ===")
-    print(f"测试次数: {num_runs}")
-    print(f"输入形状: {input_shape}")
-    print(f"平均延迟: {mean_latency:.2f} ms")
-    print(f"延迟标准差: {std_latency:.2f} ms")
-    print(f"最小延迟: {min_latency:.2f} ms")
-    print(f"最大延迟: {max_latency:.2f} ms")
-    print(f"FPS: {fps:.2f}")
-    print(f"99%延迟: {np.percentile(latencies, 99):.2f} ms")
-    
-    return mean_latency, fps
-
 if __name__ == '__main__':
 
     device = torch.device('cuda')
     model = SSCADFNet().to(device)
-    # x = torch.randn(1, 3, 512, 512).to(device)
-    # with torch.no_grad():
-    #     y = model(x)
-    # y = y.argmax(1)
-    # print(y.shape)
-    
-    calculate_params_flops(model, input_shape=(1, 3, 512, 512))
-    # measure_inference_speed(model, input_shape=(1, 3, 512, 512))
-    
-    # feas = [8,16,32,64,128]
-    # in_channel = 3
-    
-    # skips = []
-    # for fea in feas:
-    #     ct = CTBlock(in_channel,fea).to(device)
-    #     # mlp = MLP(input_dim=fea, embed_dim=8)
-    #     x = ct(x)
-    #     skips.append(x)
-    #     # print(x.shape)
-    #     in_channel = fea
-        
-    # out1s = []
-    # for fea,skip in zip(feas,skips):
-    #     mlp = MLP(input_dim=fea, embed_dim=8).to(device)
-    #     b,c,h,w = skip.shape
-    #     out = mlp(skip.reshape(b, c, h*w).permute(0, 2, 1)).permute(0, 2, 1).reshape(b, 8, h, w)
-    #     out1s.append(out)
-    #     # print(out.shape)
-    
-    # out2s = []
-    # for i,out in enumerate(out1s):
-    #     scale = 2**(i+1)
-    #     dysample = DySample(8,scale=scale).to(device)
-    #     out = dysample(out)
-    #     out2s.append(out)   
-    #     # print(out.shape) 
-    
-    # gbc = GBC(8*5).to(device)
-    # out = gbc(torch.cat(out2s,dim=1))
-    
-    # linear_fuse = BottConv(8*5, 8, 1, kernel_size=1, padding=0, stride=1).to(device)
-    # dropout = nn.Dropout(p=0.1).to(device)
-    # linear_pred = BottConv(8, 2, 1, kernel_size=1).to(device)
-    # linear_pred_1 = nn.Conv2d(2, 2, kernel_size=1).to(device)
-    
-    
-    # out = linear_fuse(out)
-    # # print(out.shape)
-    # out = dropout(out)
-    # # print(out.shape)
-    # x = linear_pred_1(linear_pred(out))
-    # print(x)
+    x = torch.randn(1, 3, 512, 512).to(device)
+    with torch.no_grad():
+        y = model(x)
+    y = y.argmax(1)
+    print(y.shape)

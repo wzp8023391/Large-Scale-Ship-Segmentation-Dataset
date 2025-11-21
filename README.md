@@ -35,7 +35,7 @@ scikit-image
 ```
 - To test SSegCADFNet, just use following script:
 ```python
-python test.py
+python Performance_test.py
 ```
 
 <!-- - The image with adverse image conditions through the SSegCADFNet can be seen as follows:
